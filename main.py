@@ -13,6 +13,7 @@ from typing import Optional
 
 from astrbot.api import logger
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
 
 try:
@@ -160,7 +161,6 @@ class LangfusePlugin(Star):
         input_data: dict,
         output_data: Optional[dict] = None,
         metadata: Optional[dict] = None,
-        level: str = "DEFAULT",
     ):
         """Create a trace for a message event"""
         if not self.enabled or not self.langfuse_client:
@@ -299,8 +299,8 @@ class LangfusePlugin(Star):
         except Exception as e:
             yield event.plain_result(f"Failed to flush traces: {e}")
 
-    @filter.on_message_event()
-    async def on_message(self, event: AstrMessageEvent):
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_all_message(self, event: AstrMessageEvent):
         """Handle all message events for tracing"""
         if not self.enabled or not self.config.get("enabled_message_tracing", True):
             return
@@ -316,13 +316,7 @@ class LangfusePlugin(Star):
             session = self._get_or_create_session(user_id, platform)
 
             # Extract message content
-            message_content = ""
-            if hasattr(event, "message_obj") and event.message_obj:
-                message_content = (
-                    str(event.message_obj.message)
-                    if hasattr(event.message_obj, "message")
-                    else ""
-                )
+            message_content = event.message_str or ""
 
             # Create trace for incoming message
             environment = self.config.get("environment", "production")
@@ -341,3 +335,90 @@ class LangfusePlugin(Star):
 
         except Exception as e:
             logger.error(f"[Langfuse] Error tracing message: {e}")
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        """Hook into LLM request for tracing"""
+        if not self.enabled or not self.config.get("enabled_llm_tracing", True):
+            return
+
+        try:
+            user_id = event.unified_msg_origin
+            platform = (
+                event.get_platform_name()
+                if hasattr(event, "get_platform_name")
+                else "unknown"
+            )
+            session = self._get_or_create_session(user_id, platform)
+
+            environment = self.config.get("environment", "production")
+
+            # Store the session trace_id for use in response hook
+            if not hasattr(event, "_langfuse_trace_id"):
+                event._langfuse_trace_id = session.trace_id
+
+            self._trace_message(
+                session=session,
+                name="llm_request",
+                input_data={
+                    "prompt": req.prompt,
+                    "system_prompt": req.system_prompt,
+                    "conversation_history": [
+                        {"role": msg.role, "content": str(msg.content)}
+                        for msg in (req.conversation_history or [])
+                    ],
+                },
+                metadata={
+                    "environment": environment,
+                    "session_trace_id": session.trace_id,
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"[Langfuse] Error tracing LLM request: {e}")
+
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """Hook into LLM response for tracing"""
+        if not self.enabled or not self.config.get("enabled_llm_tracing", True):
+            return
+
+        try:
+            user_id = event.unified_msg_origin
+            platform = (
+                event.get_platform_name()
+                if hasattr(event, "get_platform_name")
+                else "unknown"
+            )
+            session = self._get_or_create_session(user_id, platform)
+
+            environment = self.config.get("environment", "production")
+
+            # Trace the LLM completion
+            completion_text = ""
+            if resp.completion_text:
+                completion_text = resp.completion_text
+            elif resp.result_chain:
+                completion_text = str(resp.result_chain)
+
+            self._trace_llm_call(
+                session=session,
+                model=resp.model if hasattr(resp, "model") else "unknown",
+                prompt="",
+                completion=completion_text,
+                prompt_tokens=resp.usage.prompt_tokens
+                if resp.usage and hasattr(resp.usage, "prompt_tokens")
+                else None,
+                completion_tokens=resp.usage.completion_tokens
+                if resp.usage and hasattr(resp.usage, "completion_tokens")
+                else None,
+                total_tokens=resp.usage.total_tokens
+                if resp.usage and hasattr(resp.usage, "total_tokens")
+                else None,
+                metadata={
+                    "environment": environment,
+                },
+            )
+
+        except Exception as e:
+            logger.error(f"[Langfuse] Error tracing LLM response: {e}")
