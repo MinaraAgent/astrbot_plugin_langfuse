@@ -1,0 +1,44 @@
+name: astrbot_plugin_langfuse
+desc: Langfuse integration plugin for AstrBot - LLM observability and tracing
+version: 1.0.0
+author: minaraagent
+repo: https://github.com/minaraagent/astrbot_plugin_langfuse
+license: MIT
+
+# Plugin configuration
+config:
+  enabled:
+    type: bool
+    default: true
+    description: Enable Langfuse tracing
+  secret_key:
+    type: string
+    default: ""
+    description: Langfuse Secret Key (from https://cloud.langfuse.com)
+  public_key:
+    type: string
+    default: ""
+    description: Langfuse Public Key (from https://cloud.langfuse.com)
+  base_url:
+    type: string
+    default: "https://cloud.langfuse.com"
+    description: Langfuse API base URL (use http://localhost:3000 for self-hosted)
+  enabled_llm_tracing:
+    type: bool
+    default: true
+    description: Enable LLM call tracing
+  enabled_message_tracing:
+    type: bool
+    default: true
+    description: Enable message event tracing
+  session_timeout:
+    type: int
+    default: 3600
+    description: Session timeout in seconds (default: 1 hour)
+  environment:
+    type: string
+    default: "production"
+    description: Environment name for traces (e.g., production, development)
+
+# Supported AstrBot versions
+astrbot_version: ">=3.4.0"
