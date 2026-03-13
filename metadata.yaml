@@ -2,7 +2,7 @@ name: astrbot_plugin_langfuse
 desc: Langfuse integration plugin for AstrBot - LLM observability and tracing
 version: 1.0.0
 author: minaraagent
-repo: https://github.com/minaraagent/astrbot_plugin_langfuse
+repo: https://github.com/MinaraAgent/astrbot_plugin_langfuse
 license: MIT
 
 # Plugin configuration
