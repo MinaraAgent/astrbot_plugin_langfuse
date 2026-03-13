@@ -8,17 +8,17 @@ enabling tracing of LLM calls and message events.
 import asyncio
 import time
 import uuid
-from typing import Optional
 from dataclasses import dataclass, field
+from typing import Optional
 
-from astrbot.api import logger, sp
-from astrbot.api.event import filter, AstrMessageEvent, MessageChain
-from astrbot.api.star import Context, Star, register
-from astrbot.core.config.default import VERSION
+from astrbot.api import logger
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star
 
 try:
     from langfuse import Langfuse
     from langfuse.api.resources.commons.errors.errors import BaseError as LangfuseError
+
     LANGFUSE_AVAILABLE = True
 except ImportError:
     LANGFUSE_AVAILABLE = False
@@ -29,13 +29,13 @@ except ImportError:
 @dataclass
 class SessionInfo:
     """Session information for tracking conversations"""
+
     session_id: str
     trace_id: str
     last_activity: float
     metadata: dict = field(default_factory=dict)
 
 
-@register("astrbot_plugin_langfuse", "minaraagent", "Langfuse integration plugin for AstrBot")
 class LangfusePlugin(Star):
     """Langfuse integration plugin for AstrBot"""
 
@@ -50,24 +50,29 @@ class LangfusePlugin(Star):
     async def _get_config(self) -> dict:
         """Get plugin configuration from AstrBot config"""
         config = self.config
-        if hasattr(self.context, 'get_config'):
+        if hasattr(self.context, "get_config"):
             config = self.context.get_config() or {}
         return config
 
     async def _init_langfuse(self) -> bool:
         """Initialize Langfuse client"""
         if not LANGFUSE_AVAILABLE:
-            logger.error("[Langfuse] langfuse package not installed. Run: pip install langfuse")
+            logger.error(
+                "[Langfuse] langfuse package not installed. Run: pip install langfuse"
+            )
             return False
 
         config = await self._get_config()
 
-        secret_key = config.get('secret_key', '')
-        public_key = config.get('public_key', '')
-        base_url = config.get('base_url', 'https://cloud.langfuse.com')
+        secret_key = config.get("secret_key", "")
+        public_key = config.get("public_key", "")
+        base_url = config.get("base_url", "https://cloud.langfuse.com")
 
         if not secret_key or not public_key:
-            logger.warning("[Langfuse] Secret key or public key not configured. Please set them in plugin config.")
+            logger.warning(
+                "[Langfuse] Secret key or public key not configured. "
+                "Please set them in plugin config."
+            )
             return False
 
         try:
@@ -75,10 +80,12 @@ class LangfusePlugin(Star):
                 secret_key=secret_key,
                 public_key=public_key,
                 host=base_url,
-                enabled=config.get('enabled', True),
+                enabled=config.get("enabled", True),
             )
             self.enabled = True
-            logger.info(f"[Langfuse] Client initialized successfully. Base URL: {base_url}")
+            logger.info(
+                f"[Langfuse] Client initialized successfully. Base URL: {base_url}"
+            )
             return True
         except Exception as e:
             logger.error(f"[Langfuse] Failed to initialize client: {e}")
@@ -88,7 +95,7 @@ class LangfusePlugin(Star):
         """Get or create a session for a user"""
         session_key = f"{platform}:{user_id}"
         current_time = time.time()
-        session_timeout = self.config.get('session_timeout', 3600)
+        session_timeout = self.config.get("session_timeout", 3600)
 
         if session_key in self.sessions:
             session = self.sessions[session_key]
@@ -99,7 +106,7 @@ class LangfusePlugin(Star):
                     session_id=str(uuid.uuid4()),
                     trace_id=str(uuid.uuid4()),
                     last_activity=current_time,
-                    metadata={'platform': platform, 'user_id': user_id}
+                    metadata={"platform": platform, "user_id": user_id},
                 )
                 self.sessions[session_key] = session
             else:
@@ -109,7 +116,7 @@ class LangfusePlugin(Star):
                 session_id=str(uuid.uuid4()),
                 trace_id=str(uuid.uuid4()),
                 last_activity=current_time,
-                metadata={'platform': platform, 'user_id': user_id}
+                metadata={"platform": platform, "user_id": user_id},
             )
             self.sessions[session_key] = session
 
@@ -121,10 +128,11 @@ class LangfusePlugin(Star):
             try:
                 await asyncio.sleep(300)  # Check every 5 minutes
                 current_time = time.time()
-                session_timeout = self.config.get('session_timeout', 3600)
+                session_timeout = self.config.get("session_timeout", 3600)
 
                 expired_keys = [
-                    key for key, session in self.sessions.items()
+                    key
+                    for key, session in self.sessions.items()
                     if current_time - session.last_activity > session_timeout
                 ]
 
@@ -132,7 +140,9 @@ class LangfusePlugin(Star):
                     del self.sessions[key]
 
                 if expired_keys:
-                    logger.debug(f"[Langfuse] Cleaned up {len(expired_keys)} expired sessions")
+                    logger.debug(
+                        f"[Langfuse] Cleaned up {len(expired_keys)} expired sessions"
+                    )
 
                 # Flush Langfuse client periodically
                 if self.langfuse_client:
@@ -150,7 +160,7 @@ class LangfusePlugin(Star):
         input_data: dict,
         output_data: Optional[dict] = None,
         metadata: Optional[dict] = None,
-        level: str = "DEFAULT"
+        level: str = "DEFAULT",
     ):
         """Create a trace for a message event"""
         if not self.enabled or not self.langfuse_client:
@@ -182,7 +192,7 @@ class LangfusePlugin(Star):
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
         total_tokens: Optional[int] = None,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
     ):
         """Create a trace for an LLM call"""
         if not self.enabled or not self.langfuse_client:
@@ -205,7 +215,9 @@ class LangfusePlugin(Star):
                     "prompt": prompt_tokens,
                     "completion": completion_tokens,
                     "total": total_tokens,
-                } if total_tokens else None,
+                }
+                if total_tokens
+                else None,
             )
 
             return generation
@@ -213,11 +225,11 @@ class LangfusePlugin(Star):
             logger.error(f"[Langfuse] Error tracing LLM call: {e}")
             return None
 
-    async def initialize(self, config: dict):
+    async def init(self, config: dict):
         """Initialize the plugin"""
         self.config = config
 
-        if not config.get('enabled', True):
+        if not config.get("enabled", True):
             logger.info("[Langfuse] Plugin is disabled in config")
             return
 
@@ -249,15 +261,19 @@ class LangfusePlugin(Star):
     async def langfuse_status(self, event: AstrMessageEvent):
         """Check Langfuse connection status"""
         if not LANGFUSE_AVAILABLE:
-            await event.send_message("Langfuse package is not installed. Run: pip install langfuse")
+            yield event.plain_result(
+                "Langfuse package is not installed. Run: pip install langfuse"
+            )
             return
 
         if not self.enabled:
-            await event.send_message("Langfuse is not enabled or not configured properly.")
+            yield event.plain_result(
+                "Langfuse is not enabled or not configured properly."
+            )
             return
 
         config = await self._get_config()
-        base_url = config.get('base_url', 'https://cloud.langfuse.com')
+        base_url = config.get("base_url", "https://cloud.langfuse.com")
         active_sessions = len(self.sessions)
 
         status_msg = (
@@ -268,40 +284,48 @@ class LangfusePlugin(Star):
             f"- LLM Tracing: {'Enabled' if config.get('enabled_llm_tracing', True) else 'Disabled'}\n"
             f"- Message Tracing: {'Enabled' if config.get('enabled_message_tracing', True) else 'Disabled'}"
         )
-        await event.send_message(status_msg)
+        yield event.plain_result(status_msg)
 
     @filter.command("langfuse_flush")
     async def langfuse_flush(self, event: AstrMessageEvent):
         """Manually flush Langfuse traces"""
         if not self.enabled or not self.langfuse_client:
-            await event.send_message("Langfuse is not enabled.")
+            yield event.plain_result("Langfuse is not enabled.")
             return
 
         try:
             self.langfuse_client.flush()
-            await event.send_message("Langfuse traces flushed successfully.")
+            yield event.plain_result("Langfuse traces flushed successfully.")
         except Exception as e:
-            await event.send_message(f"Failed to flush traces: {e}")
+            yield event.plain_result(f"Failed to flush traces: {e}")
 
     @filter.on_message_event()
     async def on_message(self, event: AstrMessageEvent):
         """Handle all message events for tracing"""
-        if not self.enabled or not self.config.get('enabled_message_tracing', True):
+        if not self.enabled or not self.config.get("enabled_message_tracing", True):
             return
 
         try:
             # Get user and platform info
             user_id = event.unified_msg_origin
-            platform = event.get_platform_name() if hasattr(event, 'get_platform_name') else 'unknown'
+            platform = (
+                event.get_platform_name()
+                if hasattr(event, "get_platform_name")
+                else "unknown"
+            )
             session = self._get_or_create_session(user_id, platform)
 
             # Extract message content
             message_content = ""
-            if hasattr(event, 'message_obj') and event.message_obj:
-                message_content = str(event.message_obj.message) if hasattr(event.message_obj, 'message') else ""
+            if hasattr(event, "message_obj") and event.message_obj:
+                message_content = (
+                    str(event.message_obj.message)
+                    if hasattr(event.message_obj, "message")
+                    else ""
+                )
 
             # Create trace for incoming message
-            environment = self.config.get('environment', 'production')
+            environment = self.config.get("environment", "production")
             self._trace_message(
                 session=session,
                 name="user_message",
@@ -312,8 +336,7 @@ class LangfusePlugin(Star):
                 },
                 metadata={
                     "environment": environment,
-                    "astrbot_version": VERSION,
-                }
+                },
             )
 
         except Exception as e:
