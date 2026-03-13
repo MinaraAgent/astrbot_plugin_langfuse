@@ -1,0 +1,47 @@
+{
+  "secret_key": {
+    "description": "Langfuse Secret Key",
+    "type": "string",
+    "hint": "Get your Secret Key from https://cloud.langfuse.com Project Settings > API Keys",
+    "obvious_hint": true
+  },
+  "public_key": {
+    "description": "Langfuse Public Key",
+    "type": "string",
+    "hint": "Get your Public Key from https://cloud.langfuse.com Project Settings > API Keys",
+    "obvious_hint": true
+  },
+  "base_url": {
+    "description": "Langfuse API Base URL",
+    "type": "string",
+    "default": "https://cloud.langfuse.com",
+    "hint": "Use http://localhost:3000 for self-hosted Langfuse"
+  },
+  "enabled": {
+    "description": "Enable Langfuse Tracing",
+    "type": "bool",
+    "default": true
+  },
+  "enabled_llm_tracing": {
+    "description": "Enable LLM Call Tracing",
+    "type": "bool",
+    "default": true
+  },
+  "enabled_message_tracing": {
+    "description": "Enable Message Event Tracing",
+    "type": "bool",
+    "default": true
+  },
+  "session_timeout": {
+    "description": "Session Timeout (seconds)",
+    "type": "int",
+    "default": 3600,
+    "hint": "Session timeout in seconds. Default is 1 hour (3600 seconds)"
+  },
+  "environment": {
+    "description": "Environment Name",
+    "type": "string",
+    "default": "production",
+    "hint": "Environment name for traces (e.g., production, development)"
+  }
+}
