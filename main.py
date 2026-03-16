@@ -63,16 +63,15 @@ def log_both(level, msg):
 log_both("INFO", "=" * 60)
 log_both("INFO", "MODULE LOADED - astrbot_plugin_langfuse")
 log_both("INFO", f"Python version: {sys.version}")
-log_both("INFO", f"Working directory: {os.getcwd()}")
 log_both("INFO", f"Debug log file: {DEBUG_LOG_FILE}")
 log_both("INFO", "=" * 60)
 
-# Lazy import - langfuse will be imported when needed
+# Lazy import
 Langfuse = None
 LANGFUSE_AVAILABLE = False
 
 def _ensure_langfuse_imported():
-    """Lazily import langfuse package. Returns True if successful."""
+    """Lazily import langfuse package."""
     global Langfuse, LANGFUSE_AVAILABLE
 
     if LANGFUSE_AVAILABLE:
@@ -86,7 +85,6 @@ def _ensure_langfuse_imported():
         return True
     except ImportError as e:
         log_both("ERROR", f"langfuse package not available: {e}")
-        log_both("ERROR", "Make sure langfuse is installed. Check requirements.txt")
         return False
 
 
@@ -96,6 +94,7 @@ class SessionInfo:
     session_id: str
     trace_id: str
     last_activity: float
+    current_observation: Optional[object] = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -103,17 +102,6 @@ class LangfusePlugin(Star):
     """Langfuse integration plugin for AstrBot"""
 
     def __init__(self, context: Context, config: dict = None):
-        """
-        Initialize the plugin.
-
-        Args:
-            context: AstrBot context object
-            config: Plugin configuration (passed by AstrBot from _conf_schema.json)
-        """
-        log_both("INFO", "-" * 50)
-        log_both("INFO", "__init__ CALLED")
-        log_both("INFO", f"Timestamp: {datetime.now().isoformat()}")
-
         super().__init__(context)
 
         self.plugin_config = config or {}
@@ -122,28 +110,11 @@ class LangfusePlugin(Star):
         self.sessions: dict[str, SessionInfo] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
 
-        log_both("INFO", f"Config type: {type(config)}")
-        log_both("INFO", f"Config keys: {list(self.plugin_config.keys()) if self.plugin_config else 'empty'}")
-
-        # Log config values safely
-        for k, v in self.plugin_config.items():
-            if "key" in k.lower() or "secret" in k.lower():
-                safe_val = f"(len={len(str(v))})" if v else "(empty)"
-            else:
-                safe_val = str(v)[:50]
-            log_both("INFO", f"  config[{k}]: {safe_val}")
-
-        log_both("INFO", "__init__ completed")
-        log_both("INFO", "-" * 50)
+        log_both("INFO", f"Config keys: {list(self.plugin_config.keys())}")
 
     async def initialize(self) -> None:
         """Called when plugin is activated."""
-        log_both("INFO", "=" * 60)
-        log_both("INFO", "initialize() CALLED - Plugin activation started")
-        log_both("INFO", f"Timestamp: {datetime.now().isoformat()}")
-
         if not _ensure_langfuse_imported():
-            log_both("ERROR", "Cannot initialize - langfuse package not available")
             return
 
         if not self.plugin_config.get("enabled", True):
@@ -154,47 +125,32 @@ class LangfusePlugin(Star):
         public_key = self.plugin_config.get("public_key", "")
         base_url = self.plugin_config.get("base_url", "https://cloud.langfuse.com")
 
-        log_both("INFO", "Config values:")
-        log_both("INFO", f"  secret_key: {'(len=' + str(len(secret_key)) + ')' if secret_key else '(EMPTY)'}")
-        log_both("INFO", f"  public_key: {'(len=' + str(len(public_key)) + ')' if public_key else '(EMPTY)'}")
-        log_both("INFO", f"  base_url: {base_url}")
-
         if not secret_key or not public_key:
-            log_both("ERROR", "SECRET_KEY or PUBLIC_KEY is empty - check plugin config in AstrBot")
+            log_both("ERROR", "SECRET_KEY or PUBLIC_KEY is empty")
             return
 
         try:
-            log_both("INFO", "Creating Langfuse client...")
             self.langfuse_client = Langfuse(
                 secret_key=secret_key,
                 public_key=public_key,
                 host=base_url,
             )
             self.enabled = True
-            log_both("INFO", f"Langfuse client created: {self.langfuse_client is not None}")
 
-            # Test auth
             try:
                 self.langfuse_client.auth_check()
-                log_both("INFO", "Auth check PASSED - Langfuse connection successful!")
+                log_both("INFO", "Auth check PASSED - Langfuse connected!")
             except Exception as e:
                 log_both("WARNING", f"Auth check failed: {e}")
 
             self._cleanup_task = asyncio.create_task(self._cleanup_sessions())
-            log_both("INFO", "Session cleanup task started")
-            log_both("INFO", "Plugin initialized SUCCESSFULLY")
+            log_both("INFO", "Plugin initialized successfully")
 
         except Exception as e:
             log_both("ERROR", f"Failed to create Langfuse client: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
-
-        log_both("INFO", f"Final state - enabled: {self.enabled}")
-        log_both("INFO", "=" * 60)
 
     async def terminate(self) -> None:
         """Called when plugin is disabled or reloaded."""
-        log_both("INFO", "terminate() called")
-
         if self._cleanup_task:
             self._cleanup_task.cancel()
             try:
@@ -205,11 +161,8 @@ class LangfusePlugin(Star):
         if self.langfuse_client:
             try:
                 self.langfuse_client.flush()
-                log_both("INFO", "Flushed remaining traces")
-            except Exception as e:
-                log_both("ERROR", f"Error flushing: {e}")
-
-        log_both("INFO", "Plugin terminated")
+            except Exception:
+                pass
 
     def _get_or_create_session(self, user_id: str, platform: str) -> SessionInfo:
         """Get or create a session for a user"""
@@ -256,120 +209,30 @@ class LangfusePlugin(Star):
                 for key in expired_keys:
                     del self.sessions[key]
 
-                if expired_keys:
-                    log_both("INFO", f"Cleaned up {len(expired_keys)} expired sessions")
-
                 if self.langfuse_client:
                     self.langfuse_client.flush()
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                log_both("ERROR", f"Cleanup error: {e}")
-
-    def _create_trace(self, session: SessionInfo, name: str, input_data: dict,
-                      output_data: Optional[dict] = None, metadata: Optional[dict] = None):
-        """Create a trace using the new langfuse SDK API"""
-        if not self.enabled or not self.langfuse_client:
-            return None
-
-        try:
-            # Use the new SDK API: start_observation creates a span
-            # At the top level, this automatically creates a trace
-            environment = self.plugin_config.get("environment", "production")
-
-            observation = self.langfuse_client.start_observation(
-                name=name,
-                as_type="span",
-                input=input_data,
-                metadata=metadata or {},
-            )
-
-            # Set trace-level attributes
-            observation.update(
-                session_id=session.session_id,
-                metadata={"environment": environment, **(metadata or {})},
-            )
-
-            if output_data:
-                observation.update(output=output_data)
-
-            observation.end()
-
-            # Flush to ensure data is sent
-            self.langfuse_client.flush()
-            log_both("INFO", f"Trace created: {name}")
-            return observation
-
-        except Exception as e:
-            log_both("ERROR", f"Trace error: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
-            return None
-
-    def _create_generation(self, session: SessionInfo, model: str, prompt: str,
-                           completion: str, prompt_tokens: Optional[int] = None,
-                           completion_tokens: Optional[int] = None,
-                           total_tokens: Optional[int] = None,
-                           metadata: Optional[dict] = None):
-        """Create a generation trace using the new langfuse SDK API"""
-        if not self.enabled or not self.langfuse_client:
-            return None
-
-        try:
-            environment = self.plugin_config.get("environment", "production")
-
-            # Create a generation observation
-            generation = self.langfuse_client.start_observation(
-                name=f"llm_{model}",
-                as_type="generation",
-                model=model,
-                input=prompt if prompt else {"query": "N/A"},
-                output=completion,
-                metadata={"environment": environment, **(metadata or {})},
-            )
-
-            # Update with usage if available
-            if total_tokens:
-                generation.update(
-                    usage={
-                        "input": prompt_tokens or 0,
-                        "output": completion_tokens or 0,
-                        "total": total_tokens,
-                    }
-                )
-
-            generation.end()
-
-            self.langfuse_client.flush()
-            log_both("INFO", f"Generation trace created: {model}")
-            return generation
-
-        except Exception as e:
-            log_both("ERROR", f"Generation trace error: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
-            return None
+            except Exception:
+                pass
 
     @filter.command("langfuse_status")
     async def langfuse_status(self, event: AstrMessageEvent):
         """Check Langfuse connection status"""
         if not self.enabled:
             yield event.plain_result(
-                f"Langfuse is not enabled.\n"
-                f"enabled={self.enabled}, client={self.langfuse_client is not None}\n"
-                f"Check logs at: {DEBUG_LOG_FILE}"
+                f"Langfuse not enabled.\n"
+                f"Check logs: {DEBUG_LOG_FILE}"
             )
             return
 
         base_url = self.plugin_config.get("base_url", "https://cloud.langfuse.com")
-        active_sessions = len(self.sessions)
-
         status_msg = (
             f"Langfuse Status:\n"
             f"- Status: Enabled\n"
             f"- Base URL: {base_url}\n"
-            f"- Active Sessions: {active_sessions}\n"
-            f"- LLM Tracing: {'Enabled' if self.plugin_config.get('enabled_llm_tracing', True) else 'Disabled'}\n"
-            f"- Message Tracing: {'Enabled' if self.plugin_config.get('enabled_message_tracing', True) else 'Disabled'}"
+            f"- Active Sessions: {len(self.sessions)}"
         )
         yield event.plain_result(status_msg)
 
@@ -377,19 +240,22 @@ class LangfusePlugin(Star):
     async def langfuse_flush(self, event: AstrMessageEvent):
         """Manually flush Langfuse traces"""
         if not self.enabled or not self.langfuse_client:
-            yield event.plain_result(f"Langfuse is not enabled. (enabled={self.enabled})")
+            yield event.plain_result("Langfuse not enabled.")
             return
 
         try:
             self.langfuse_client.flush()
-            yield event.plain_result("Langfuse traces flushed successfully.")
+            yield event.plain_result("Traces flushed.")
         except Exception as e:
-            yield event.plain_result(f"Failed to flush: {e}")
+            yield event.plain_result(f"Flush failed: {e}")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         """Handle all message events for tracing"""
         if not self.enabled or not self.plugin_config.get("enabled_message_tracing", True):
+            return
+
+        if not self.langfuse_client:
             return
 
         try:
@@ -399,16 +265,21 @@ class LangfusePlugin(Star):
             message_content = event.message_str or ""
             environment = self.plugin_config.get("environment", "production")
 
-            self._create_trace(
-                session=session,
+            # Create a span for user message
+            observation = self.langfuse_client.start_observation(
                 name="user_message",
-                input_data={"content": message_content, "user_id": user_id, "platform": platform},
-                metadata={"environment": environment},
+                as_type="span",
+                input={"content": message_content},
+                metadata={
+                    "environment": environment,
+                    "platform": platform,
+                    "user_id": user_id,
+                },
             )
+            observation.end()
 
         except Exception as e:
             log_both("ERROR", f"Message trace error: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -416,43 +287,7 @@ class LangfusePlugin(Star):
         if not self.enabled or not self.plugin_config.get("enabled_llm_tracing", True):
             return
 
-        try:
-            user_id = event.unified_msg_origin
-            platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "unknown"
-            session = self._get_or_create_session(user_id, platform)
-            environment = self.plugin_config.get("environment", "production")
-
-            # Build input data - check what attributes ProviderRequest has
-            input_data = {
-                "prompt": req.prompt if hasattr(req, 'prompt') else str(req),
-            }
-
-            if hasattr(req, 'system_prompt') and req.system_prompt:
-                input_data["system_prompt"] = req.system_prompt
-
-            # Check for conversation history with different possible attribute names
-            if hasattr(req, 'contexts') and req.contexts:
-                input_data["contexts"] = [str(c) for c in req.contexts]
-            elif hasattr(req, 'history') and req.history:
-                input_data["history"] = [str(h) for h in req.history]
-
-            log_both("INFO", f"LLM request - ProviderRequest attrs: {[a for a in dir(req) if not a.startswith('_')]}")
-
-            self._create_trace(
-                session=session,
-                name="llm_request",
-                input_data=input_data,
-                metadata={"environment": environment},
-            )
-
-        except Exception as e:
-            log_both("ERROR", f"LLM request trace error: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
-
-    @filter.on_llm_response()
-    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
-        """Hook into LLM response for tracing"""
-        if not self.enabled or not self.plugin_config.get("enabled_llm_tracing", True):
+        if not self.langfuse_client:
             return
 
         try:
@@ -461,27 +296,129 @@ class LangfusePlugin(Star):
             session = self._get_or_create_session(user_id, platform)
             environment = self.plugin_config.get("environment", "production")
 
-            completion_text = ""
-            if hasattr(resp, 'completion_text') and resp.completion_text:
-                completion_text = resp.completion_text
-            elif hasattr(resp, 'result_chain') and resp.result_chain:
-                completion_text = str(resp.result_chain)
+            # Build input data
+            input_data = {}
 
-            model = resp.model if hasattr(resp, "model") else "unknown"
+            if req.prompt:
+                input_data["prompt"] = req.prompt
 
-            log_both("INFO", f"LLM response - LLMResponse attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
+            if req.system_prompt:
+                input_data["system_prompt"] = req.system_prompt
 
-            self._create_generation(
-                session=session,
+            if req.contexts:
+                # Truncate contexts to avoid huge payloads
+                input_data["contexts_count"] = len(req.contexts)
+                input_data["contexts"] = req.contexts[:10]  # First 10 messages
+
+            if req.image_urls:
+                input_data["image_count"] = len(req.image_urls)
+
+            # Get model name
+            model = req.model or "unknown"
+
+            # Store model in session for use in response
+            session.metadata["model"] = model
+            session.metadata["prompt"] = req.prompt
+
+            # Create a generation observation (will be updated in response)
+            observation = self.langfuse_client.start_observation(
+                name="llm_generation",
+                as_type="generation",
                 model=model,
-                prompt="",
-                completion=completion_text,
-                prompt_tokens=resp.usage.prompt_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'prompt_tokens') else None,
-                completion_tokens=resp.usage.completion_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'completion_tokens') else None,
-                total_tokens=resp.usage.total_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'total_tokens') else None,
-                metadata={"environment": environment},
+                input=input_data,
+                metadata={
+                    "environment": environment,
+                    "platform": platform,
+                    "session_id": session.session_id,
+                },
             )
+
+            # Store observation in session for later update
+            session.current_observation = observation
+            session.metadata["observation_id"] = observation.observation_id if hasattr(observation, 'observation_id') else None
+
+            log_both("INFO", f"LLM request traced - model: {model}")
+
+        except Exception as e:
+            log_both("ERROR", f"LLM request trace error: {e}")
+            log_both("ERROR", traceback.format_exc())
+
+    @filter.on_llm_response()
+    async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
+        """Hook into LLM response for tracing"""
+        if not self.enabled or not self.plugin_config.get("enabled_llm_tracing", True):
+            return
+
+        if not self.langfuse_client:
+            return
+
+        try:
+            user_id = event.unified_msg_origin
+            platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "unknown"
+            session = self._get_or_create_session(user_id, platform)
+
+            # Get completion text
+            completion_text = ""
+            if resp.completion_text:
+                completion_text = resp.completion_text
+            elif resp.result_chain:
+                completion_text = resp.result_chain.get_plain_text() if hasattr(resp.result_chain, 'get_plain_text') else str(resp.result_chain)
+
+            # Get model name - try multiple sources
+            model = session.metadata.get("model", "unknown")
+
+            # Try to get model from raw_completion
+            if resp.raw_completion and hasattr(resp.raw_completion, 'model'):
+                model = resp.raw_completion.model
+
+            # Get usage info
+            usage_dict = None
+            if resp.usage:
+                usage_dict = {
+                    "input": resp.usage.input if hasattr(resp.usage, 'input') else 0,
+                    "output": resp.usage.output if hasattr(resp.usage, 'output') else 0,
+                    "total": resp.usage.total if hasattr(resp.usage, 'total') else 0,
+                }
+
+            # Check if we have a pending observation from request
+            if session.current_observation:
+                # Update the existing observation
+                session.current_observation.update(
+                    output=completion_text,
+                    model=model,
+                )
+
+                if usage_dict:
+                    session.current_observation.update(usage=usage_dict)
+
+                session.current_observation.end()
+                session.current_observation = None
+            else:
+                # Create a new generation observation
+                environment = self.plugin_config.get("environment", "production")
+
+                generation = self.langfuse_client.start_observation(
+                    name="llm_generation",
+                    as_type="generation",
+                    model=model,
+                    input=session.metadata.get("prompt", ""),
+                    output=completion_text,
+                    metadata={
+                        "environment": environment,
+                        "platform": platform,
+                    },
+                )
+
+                if usage_dict:
+                    generation.update(usage=usage_dict)
+
+                generation.end()
+
+            # Flush to ensure data is sent
+            self.langfuse_client.flush()
+
+            log_both("INFO", f"LLM response traced - model: {model}, tokens: {usage_dict}")
 
         except Exception as e:
             log_both("ERROR", f"LLM response trace error: {e}")
-            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
+            log_both("ERROR", traceback.format_exc())
