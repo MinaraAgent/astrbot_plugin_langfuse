@@ -81,12 +81,12 @@ def _ensure_langfuse_imported():
 
     try:
         from langfuse import Langfuse as _Langfuse
-        from langfuse.api.resources.commons.errors.errors import BaseError as _LangfuseError
-
+        # LangfuseError - just use Exception, the specific error class path varies by version
         Langfuse = _Langfuse
-        LangfuseError = _LangfuseError
+        LangfuseError = Exception
         LANGFUSE_AVAILABLE = True
         log_both("INFO", "langfuse package imported successfully (lazy import)")
+        log_both("INFO", f"langfuse version: {getattr(_Langfuse, '__version__', 'unknown')}")
         return True
     except ImportError as e:
         log_both("ERROR", f"langfuse package not available: {e}")
