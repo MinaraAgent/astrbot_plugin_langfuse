@@ -112,18 +112,107 @@ class LangfusePlugin(Star):
         self.config = {}
         self.sessions: dict[str, SessionInfo] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._initialized = False  # Track if we've initialized
 
         log_both("INFO", f"Context type: {type(context)}")
-        log_both("INFO", f"Context dir: {[x for x in dir(context) if not x.startswith('_')]}")
+        log_both("INFO", f"Context attributes: {[x for x in dir(context) if not x.startswith('_')]}")
 
-        # Check if context has config-related attributes
+        # Check ALL possible ways config might be available
+        log_both("INFO", "=== Checking context for config ===")
+
+        # Check context.config
         if hasattr(context, 'config'):
-            log_both("INFO", f"context.config: {context.config}")
+            ctx_config = context.config
+            log_both("INFO", f"context.config exists: {type(ctx_config)}")
+            if ctx_config:
+                log_both("INFO", f"context.config keys: {list(ctx_config.keys()) if isinstance(ctx_config, dict) else 'not a dict'}")
+                for k, v in (ctx_config.items() if isinstance(ctx_config, dict) else []):
+                    if "key" in k.lower() or "secret" in k.lower():
+                        safe_val = f"(len={len(str(v))})" if v else "(empty)"
+                    else:
+                        safe_val = str(v)[:50]
+                    log_both("INFO", f"  context.config[{k}]: {safe_val}")
+
+        # Check context.get_config method
         if hasattr(context, 'get_config'):
             log_both("INFO", "context has get_config method")
+            try:
+                cfg = context.get_config()
+                log_both("INFO", f"context.get_config() returned: {type(cfg)}")
+                if cfg:
+                    log_both("INFO", f"get_config() keys: {list(cfg.keys()) if isinstance(cfg, dict) else 'not a dict'}")
+            except Exception as e:
+                log_both("WARNING", f"context.get_config() raised: {e}")
+
+        # Check context._config (private)
+        if hasattr(context, '_config'):
+            log_both("INFO", f"context._config: {context._config}")
+
+        # Check if context is a dict itself
+        if isinstance(context, dict):
+            log_both("INFO", f"context IS a dict with keys: {list(context.keys())}")
+
+        # Check parent class attributes
+        if hasattr(self, 'context'):
+            log_both("INFO", f"self.context exists: {type(self.context)}")
+        if hasattr(self, '_config'):
+            log_both("INFO", f"self._config: {self._config}")
+
+        # Try to initialize immediately if config is available in context
+        if hasattr(context, 'config') and context.config:
+            log_both("INFO", ">>> Attempting early initialization from context.config")
+            self.config = context.config
+            self._try_init_sync()
 
         log_both("INFO", "__init__ completed")
         log_both("INFO", "-" * 50)
+
+    def _try_init_sync(self):
+        """Try to initialize Langfuse synchronously (called from __init__)"""
+        log_both("INFO", ">>> _try_init_sync() called")
+
+        if not LANGFUSE_AVAILABLE:
+            log_both("ERROR", "langfuse package not available")
+            return False
+
+        config = self.config
+        secret_key = config.get("secret_key", "")
+        public_key = config.get("public_key", "")
+        base_url = config.get("base_url", "https://cloud.langfuse.com")
+        enabled = config.get("enabled", True)
+
+        log_both("INFO", f"Config in _try_init_sync:")
+        log_both("INFO", f"  secret_key: {'(len=' + str(len(secret_key)) + ')' if secret_key else '(EMPTY)'}")
+        log_both("INFO", f"  public_key: {'(len=' + str(len(public_key)) + ')' if public_key else '(EMPTY)'}")
+        log_both("INFO", f"  base_url: {base_url}")
+
+        if not secret_key or not public_key:
+            log_both("WARNING", "Keys empty in _try_init_sync, cannot init yet")
+            return False
+
+        try:
+            log_both("INFO", "Creating Langfuse client in _try_init_sync...")
+            self.langfuse_client = Langfuse(
+                secret_key=secret_key,
+                public_key=public_key,
+                host=base_url,
+                enabled=enabled,
+            )
+            self.enabled = True
+            self._initialized = True
+            log_both("INFO", f"_try_init_sync SUCCESS - enabled={self.enabled}")
+
+            # Test auth
+            try:
+                self.langfuse_client.auth_check()
+                log_both("INFO", "Auth check PASSED")
+            except Exception as e:
+                log_both("WARNING", f"Auth check failed: {e}")
+
+            return True
+        except Exception as e:
+            log_both("ERROR", f"_try_init_sync failed: {e}")
+            return False
 
     async def _get_config(self) -> dict:
         """Get plugin configuration from AstrBot config"""
@@ -550,13 +639,51 @@ class LangfusePlugin(Star):
             log_both("ERROR", f"  flush() failed: {e}")
             yield event.plain_result(f"Failed to flush traces: {e}")
 
+    async def _ensure_initialized(self):
+        """Try to initialize if not already done"""
+        if self._initialized:
+            return True
+
+        log_both("INFO", ">>> _ensure_initialized() - plugin not yet initialized")
+
+        # Try to get config from various sources
+        config = {}
+
+        # Try context.config
+        if hasattr(self.context, 'config') and self.context.config:
+            config = self.context.config
+            log_both("INFO", f"  Got config from context.config")
+
+        # Try context.get_config()
+        if not config and hasattr(self.context, 'get_config'):
+            try:
+                config = self.context.get_config() or {}
+                log_both("INFO", f"  Got config from context.get_config()")
+            except Exception as e:
+                log_both("WARNING", f"  context.get_config() failed: {e}")
+
+        # If we got config, try to init
+        if config:
+            self.config = config
+            if self._try_init_sync():
+                log_both("INFO", "  Lazy initialization SUCCESS")
+                return True
+
+        log_both("WARNING", "  Could not lazy-initialize - no valid config found")
+        return False
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         """Handle all message events for tracing"""
         log_both("INFO", ">>> on_all_message() EVENT TRIGGERED")
         log_both("INFO", f"  self.enabled: {self.enabled}")
         log_both("INFO", f"  self.langfuse_client: {self.langfuse_client is not None}")
+        log_both("INFO", f"  self._initialized: {self._initialized}")
         log_both("INFO", f"  message_tracing enabled: {self.config.get('enabled_message_tracing', True)}")
+
+        # Try lazy initialization if not enabled
+        if not self.enabled:
+            await self._ensure_initialized()
 
         if not self.enabled or not self.config.get("enabled_message_tracing", True):
             log_both("INFO", "  SKIPPING - message tracing disabled")
@@ -607,7 +734,12 @@ class LangfusePlugin(Star):
         """Hook into LLM request for tracing"""
         log_both("INFO", ">>> on_llm_request() EVENT TRIGGERED")
         log_both("INFO", f"  self.enabled: {self.enabled}")
+        log_both("INFO", f"  self._initialized: {self._initialized}")
         log_both("INFO", f"  llm_tracing enabled: {self.config.get('enabled_llm_tracing', True)}")
+
+        # Try lazy initialization if not enabled
+        if not self.enabled:
+            await self._ensure_initialized()
 
         if not self.enabled or not self.config.get("enabled_llm_tracing", True):
             log_both("INFO", "  SKIPPING - LLM tracing disabled")
@@ -660,7 +792,12 @@ class LangfusePlugin(Star):
         """Hook into LLM response for tracing"""
         log_both("INFO", ">>> on_llm_response() EVENT TRIGGERED")
         log_both("INFO", f"  self.enabled: {self.enabled}")
+        log_both("INFO", f"  self._initialized: {self._initialized}")
         log_both("INFO", f"  llm_tracing enabled: {self.config.get('enabled_llm_tracing', True)}")
+
+        # Try lazy initialization if not enabled
+        if not self.enabled:
+            await self._ensure_initialized()
 
         if not self.enabled or not self.config.get("enabled_llm_tracing", True):
             log_both("INFO", "  SKIPPING - LLM tracing disabled")
