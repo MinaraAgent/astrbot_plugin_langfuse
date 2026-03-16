@@ -183,7 +183,6 @@ class LangfusePlugin(Star):
                 secret_key=secret_key,
                 public_key=public_key,
                 host=base_url,
-                enabled=True,
             )
             self.enabled = True
             log_both("INFO", f"Langfuse client created: {self.langfuse_client is not None}")
