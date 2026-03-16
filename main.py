@@ -68,18 +68,21 @@ log_both("INFO", "=" * 60)
 
 # Lazy import
 Langfuse = None
+propagate_attributes = None
 LANGFUSE_AVAILABLE = False
 
 def _ensure_langfuse_imported():
     """Lazily import langfuse package."""
-    global Langfuse, LANGFUSE_AVAILABLE
+    global Langfuse, propagate_attributes, LANGFUSE_AVAILABLE
 
     if LANGFUSE_AVAILABLE:
         return True
 
     try:
         from langfuse import Langfuse as _Langfuse
+        from langfuse._client.propagation import propagate_attributes as _propagate_attributes
         Langfuse = _Langfuse
+        propagate_attributes = _propagate_attributes
         LANGFUSE_AVAILABLE = True
         log_both("INFO", "langfuse package imported successfully")
         return True
@@ -265,19 +268,22 @@ class LangfusePlugin(Star):
             message_content = event.message_str or ""
             environment = self.plugin_config.get("environment", "production")
 
-            # Create a span for user message with session and user info in metadata
-            observation = self.langfuse_client.start_observation(
-                name="user_message",
-                as_type="span",
-                input={"content": message_content},
+            # Use propagate_attributes to properly set session_id and user_id
+            # This ensures all observations inherit these trace-level attributes
+            with propagate_attributes(
+                session_id=session.session_id,
+                user_id=user_id,
                 metadata={
                     "environment": environment,
                     "platform": platform,
-                    "session_id": session.session_id,
-                    "user_id": user_id,
                 },
-            )
-            observation.end()
+            ):
+                observation = self.langfuse_client.start_observation(
+                    name="user_message",
+                    as_type="span",
+                    input={"content": message_content},
+                )
+                observation.end()
 
         except Exception as e:
             log_both("ERROR", f"Message trace error: {e}")
@@ -321,22 +327,26 @@ class LangfusePlugin(Star):
             session.metadata["model"] = model
             session.metadata["prompt"] = req.prompt
 
-            # Create a generation observation (will be updated in response)
-            observation = self.langfuse_client.start_observation(
-                name="llm_generation",
-                as_type="generation",
-                model=model,
-                input=input_data,
+            # Use propagate_attributes to properly set session_id and user_id
+            with propagate_attributes(
+                session_id=session.session_id,
+                user_id=user_id,
                 metadata={
                     "environment": environment,
                     "platform": platform,
-                    "session_id": session.session_id,
                 },
-            )
+            ):
+                # Create a generation observation (will be updated in response)
+                observation = self.langfuse_client.start_observation(
+                    name="llm_generation",
+                    as_type="generation",
+                    model=model,
+                    input=input_data,
+                )
 
-            # Store observation in session for later update
-            session.current_observation = observation
-            session.metadata["observation_id"] = observation.observation_id if hasattr(observation, 'observation_id') else None
+                # Store observation in session for later update
+                session.current_observation = observation
+                session.metadata["observation_id"] = observation.observation_id if hasattr(observation, 'observation_id') else None
 
             log_both("INFO", f"LLM request traced - model: {model}")
 
@@ -357,6 +367,7 @@ class LangfusePlugin(Star):
             user_id = event.unified_msg_origin
             platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "unknown"
             session = self._get_or_create_session(user_id, platform)
+            environment = self.plugin_config.get("environment", "production")
 
             # Get completion text
             completion_text = ""
@@ -383,7 +394,7 @@ class LangfusePlugin(Star):
 
             # Check if we have a pending observation from request
             if session.current_observation:
-                # Update the existing observation
+                # Update the existing observation (already has session_id and user_id from request)
                 session.current_observation.update(
                     output=completion_text,
                     model=model,
@@ -395,25 +406,27 @@ class LangfusePlugin(Star):
                 session.current_observation.end()
                 session.current_observation = None
             else:
-                # Create a new generation observation
-                environment = self.plugin_config.get("environment", "production")
-
-                generation = self.langfuse_client.start_observation(
-                    name="llm_generation",
-                    as_type="generation",
-                    model=model,
-                    input=session.metadata.get("prompt", ""),
-                    output=completion_text,
+                # Create a new generation observation with propagate_attributes
+                with propagate_attributes(
+                    session_id=session.session_id,
+                    user_id=user_id,
                     metadata={
                         "environment": environment,
                         "platform": platform,
                     },
-                )
+                ):
+                    generation = self.langfuse_client.start_observation(
+                        name="llm_generation",
+                        as_type="generation",
+                        model=model,
+                        input=session.metadata.get("prompt", ""),
+                        output=completion_text,
+                    )
 
-                if usage_dict:
-                    generation.update(usage=usage_dict)
+                    if usage_dict:
+                        generation.update(usage=usage_dict)
 
-                generation.end()
+                    generation.end()
 
             # Flush to ensure data is sent
             self.langfuse_client.flush()

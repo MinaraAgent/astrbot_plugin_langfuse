@@ -2,6 +2,13 @@
 
 All notable changes to the AstrBot Langfuse Plugin will be documented in this file.
 
+## [1.0.2] - 2025-03-16
+
+### Fixed
+- Use `propagate_attributes()` context manager for proper session_id and user_id integration
+- Session and user tracking now follows Langfuse SDK v3 best practices
+- Attributes are properly propagated to all child observations within the context
+
 ## [1.0.1] - 2025-03-16
 
 ### Fixed
