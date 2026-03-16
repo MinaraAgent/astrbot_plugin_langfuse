@@ -14,7 +14,7 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 from astrbot.api import logger as astrbot_logger
 from astrbot.api.event import filter, AstrMessageEvent
@@ -67,26 +67,22 @@ log_both("INFO", f"Working directory: {os.getcwd()}")
 log_both("INFO", f"Debug log file: {DEBUG_LOG_FILE}")
 log_both("INFO", "=" * 60)
 
-# Lazy import - langfuse will be imported when needed, AFTER AstrBot installs dependencies
+# Lazy import - langfuse will be imported when needed
 Langfuse = None
-LangfuseError = Exception
 LANGFUSE_AVAILABLE = False
 
 def _ensure_langfuse_imported():
     """Lazily import langfuse package. Returns True if successful."""
-    global Langfuse, LangfuseError, LANGFUSE_AVAILABLE
+    global Langfuse, LANGFUSE_AVAILABLE
 
     if LANGFUSE_AVAILABLE:
         return True
 
     try:
         from langfuse import Langfuse as _Langfuse
-        # LangfuseError - just use Exception, the specific error class path varies by version
         Langfuse = _Langfuse
-        LangfuseError = Exception
         LANGFUSE_AVAILABLE = True
-        log_both("INFO", "langfuse package imported successfully (lazy import)")
-        log_both("INFO", f"langfuse version: {getattr(_Langfuse, '__version__', 'unknown')}")
+        log_both("INFO", "langfuse package imported successfully")
         return True
     except ImportError as e:
         log_both("ERROR", f"langfuse package not available: {e}")
@@ -118,10 +114,8 @@ class LangfusePlugin(Star):
         log_both("INFO", "__init__ CALLED")
         log_both("INFO", f"Timestamp: {datetime.now().isoformat()}")
 
-        # Call parent __init__
         super().__init__(context)
 
-        # Store config - this is passed by AstrBot from _conf_schema.json
         self.plugin_config = config or {}
         self.langfuse_client = None
         self.enabled = False
@@ -129,8 +123,7 @@ class LangfusePlugin(Star):
         self._cleanup_task: Optional[asyncio.Task] = None
 
         log_both("INFO", f"Config type: {type(config)}")
-        log_both("INFO", f"Config value: {config}")
-        log_both("INFO", f"self.plugin_config keys: {list(self.plugin_config.keys()) if self.plugin_config else 'empty'}")
+        log_both("INFO", f"Config keys: {list(self.plugin_config.keys()) if self.plugin_config else 'empty'}")
 
         # Log config values safely
         for k, v in self.plugin_config.items():
@@ -144,26 +137,19 @@ class LangfusePlugin(Star):
         log_both("INFO", "-" * 50)
 
     async def initialize(self) -> None:
-        """
-        Called when plugin is activated.
-        This is the correct method name for AstrBot (not 'init').
-        """
+        """Called when plugin is activated."""
         log_both("INFO", "=" * 60)
         log_both("INFO", "initialize() CALLED - Plugin activation started")
         log_both("INFO", f"Timestamp: {datetime.now().isoformat()}")
 
-        # Try to import langfuse now (after AstrBot has installed dependencies)
         if not _ensure_langfuse_imported():
             log_both("ERROR", "Cannot initialize - langfuse package not available")
-            log_both("ERROR", "Try: pip install langfuse in AstrBot's Python environment")
             return
 
-        # Check if disabled in config
         if not self.plugin_config.get("enabled", True):
             log_both("INFO", "Plugin is DISABLED in config")
             return
 
-        # Get config values
         secret_key = self.plugin_config.get("secret_key", "")
         public_key = self.plugin_config.get("public_key", "")
         base_url = self.plugin_config.get("base_url", "https://cloud.langfuse.com")
@@ -194,10 +180,8 @@ class LangfusePlugin(Star):
             except Exception as e:
                 log_both("WARNING", f"Auth check failed: {e}")
 
-            # Start cleanup task
             self._cleanup_task = asyncio.create_task(self._cleanup_sessions())
             log_both("INFO", "Session cleanup task started")
-
             log_both("INFO", "Plugin initialized SUCCESSFULLY")
 
         except Exception as e:
@@ -283,71 +267,86 @@ class LangfusePlugin(Star):
             except Exception as e:
                 log_both("ERROR", f"Cleanup error: {e}")
 
-    def _trace_message(self, session: SessionInfo, name: str, input_data: dict,
-                       output_data: Optional[dict] = None, metadata: Optional[dict] = None):
-        """Create a trace for a message event"""
+    def _create_trace(self, session: SessionInfo, name: str, input_data: dict,
+                      output_data: Optional[dict] = None, metadata: Optional[dict] = None):
+        """Create a trace using the new langfuse SDK API"""
         if not self.enabled or not self.langfuse_client:
             return None
 
         try:
-            trace = self.langfuse_client.trace(
-                id=session.trace_id,
+            # Use the new SDK API: start_observation creates a span
+            # At the top level, this automatically creates a trace
+            environment = self.plugin_config.get("environment", "production")
+
+            observation = self.langfuse_client.start_observation(
                 name=name,
-                session_id=session.session_id,
+                as_type="span",
                 input=input_data,
                 metadata=metadata or {},
             )
 
-            if output_data:
-                trace.update(output=output_data)
+            # Set trace-level attributes
+            observation.update(
+                session_id=session.session_id,
+                metadata={"environment": environment, **(metadata or {})},
+            )
 
+            if output_data:
+                observation.update(output=output_data)
+
+            observation.end()
+
+            # Flush to ensure data is sent
             self.langfuse_client.flush()
             log_both("INFO", f"Trace created: {name}")
-            return trace
+            return observation
 
         except Exception as e:
             log_both("ERROR", f"Trace error: {e}")
+            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
             return None
 
-    def _trace_llm_call(self, session: SessionInfo, model: str, prompt: str,
-                        completion: str, prompt_tokens: Optional[int] = None,
-                        completion_tokens: Optional[int] = None,
-                        total_tokens: Optional[int] = None,
-                        metadata: Optional[dict] = None):
-        """Create a trace for an LLM call"""
+    def _create_generation(self, session: SessionInfo, model: str, prompt: str,
+                           completion: str, prompt_tokens: Optional[int] = None,
+                           completion_tokens: Optional[int] = None,
+                           total_tokens: Optional[int] = None,
+                           metadata: Optional[dict] = None):
+        """Create a generation trace using the new langfuse SDK API"""
         if not self.enabled or not self.langfuse_client:
             return None
 
         try:
-            trace = self.langfuse_client.trace(
-                id=session.trace_id,
-                name="llm_call",
-                session_id=session.session_id,
-                metadata=metadata or {},
-            )
+            environment = self.plugin_config.get("environment", "production")
 
-            usage_dict = None
-            if total_tokens:
-                usage_dict = {
-                    "prompt": prompt_tokens,
-                    "completion": completion_tokens,
-                    "total": total_tokens,
-                }
-
-            generation = trace.generation(
+            # Create a generation observation
+            generation = self.langfuse_client.start_observation(
                 name=f"llm_{model}",
+                as_type="generation",
                 model=model,
-                input=prompt,
+                input=prompt if prompt else {"query": "N/A"},
                 output=completion,
-                usage=usage_dict,
+                metadata={"environment": environment, **(metadata or {})},
             )
+
+            # Update with usage if available
+            if total_tokens:
+                generation.update(
+                    usage={
+                        "input": prompt_tokens or 0,
+                        "output": completion_tokens or 0,
+                        "total": total_tokens,
+                    }
+                )
+
+            generation.end()
 
             self.langfuse_client.flush()
-            log_both("INFO", f"LLM trace created: {model}")
+            log_both("INFO", f"Generation trace created: {model}")
             return generation
 
         except Exception as e:
-            log_both("ERROR", f"LLM trace error: {e}")
+            log_both("ERROR", f"Generation trace error: {e}")
+            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
             return None
 
     @filter.command("langfuse_status")
@@ -400,7 +399,7 @@ class LangfusePlugin(Star):
             message_content = event.message_str or ""
             environment = self.plugin_config.get("environment", "production")
 
-            self._trace_message(
+            self._create_trace(
                 session=session,
                 name="user_message",
                 input_data={"content": message_content, "user_id": user_id, "platform": platform},
@@ -409,6 +408,7 @@ class LangfusePlugin(Star):
 
         except Exception as e:
             log_both("ERROR", f"Message trace error: {e}")
+            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -422,25 +422,32 @@ class LangfusePlugin(Star):
             session = self._get_or_create_session(user_id, platform)
             environment = self.plugin_config.get("environment", "production")
 
-            if not hasattr(event, "_langfuse_trace_id"):
-                event._langfuse_trace_id = session.trace_id
+            # Build input data - check what attributes ProviderRequest has
+            input_data = {
+                "prompt": req.prompt if hasattr(req, 'prompt') else str(req),
+            }
 
-            self._trace_message(
+            if hasattr(req, 'system_prompt') and req.system_prompt:
+                input_data["system_prompt"] = req.system_prompt
+
+            # Check for conversation history with different possible attribute names
+            if hasattr(req, 'contexts') and req.contexts:
+                input_data["contexts"] = [str(c) for c in req.contexts]
+            elif hasattr(req, 'history') and req.history:
+                input_data["history"] = [str(h) for h in req.history]
+
+            log_both("INFO", f"LLM request - ProviderRequest attrs: {[a for a in dir(req) if not a.startswith('_')]}")
+
+            self._create_trace(
                 session=session,
                 name="llm_request",
-                input_data={
-                    "prompt": req.prompt,
-                    "system_prompt": req.system_prompt,
-                    "conversation_history": [
-                        {"role": msg.role, "content": str(msg.content)}
-                        for msg in (req.conversation_history or [])
-                    ],
-                },
-                metadata={"environment": environment, "session_trace_id": session.trace_id},
+                input_data=input_data,
+                metadata={"environment": environment},
             )
 
         except Exception as e:
             log_both("ERROR", f"LLM request trace error: {e}")
+            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
 
     @filter.on_llm_response()
     async def on_llm_response(self, event: AstrMessageEvent, resp: LLMResponse):
@@ -454,19 +461,27 @@ class LangfusePlugin(Star):
             session = self._get_or_create_session(user_id, platform)
             environment = self.plugin_config.get("environment", "production")
 
-            completion_text = resp.completion_text or (str(resp.result_chain) if resp.result_chain else "")
+            completion_text = ""
+            if hasattr(resp, 'completion_text') and resp.completion_text:
+                completion_text = resp.completion_text
+            elif hasattr(resp, 'result_chain') and resp.result_chain:
+                completion_text = str(resp.result_chain)
+
             model = resp.model if hasattr(resp, "model") else "unknown"
 
-            self._trace_llm_call(
+            log_both("INFO", f"LLM response - LLMResponse attrs: {[a for a in dir(resp) if not a.startswith('_')]}")
+
+            self._create_generation(
                 session=session,
                 model=model,
                 prompt="",
                 completion=completion_text,
-                prompt_tokens=resp.usage.prompt_tokens if resp.usage and hasattr(resp.usage, "prompt_tokens") else None,
-                completion_tokens=resp.usage.completion_tokens if resp.usage and hasattr(resp.usage, "completion_tokens") else None,
-                total_tokens=resp.usage.total_tokens if resp.usage and hasattr(resp.usage, "total_tokens") else None,
+                prompt_tokens=resp.usage.prompt_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'prompt_tokens') else None,
+                completion_tokens=resp.usage.completion_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'completion_tokens') else None,
+                total_tokens=resp.usage.total_tokens if hasattr(resp, 'usage') and resp.usage and hasattr(resp.usage, 'total_tokens') else None,
                 metadata={"environment": environment},
             )
 
         except Exception as e:
             log_both("ERROR", f"LLM response trace error: {e}")
+            log_both("ERROR", f"Traceback: {traceback.format_exc()}")
