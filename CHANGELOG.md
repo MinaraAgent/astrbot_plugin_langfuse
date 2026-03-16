@@ -2,6 +2,12 @@
 
 All notable changes to the AstrBot Langfuse Plugin will be documented in this file.
 
+## [1.0.1] - 2025-03-16
+
+### Fixed
+- Fixed error: `start_observation()` doesn't accept `session_id` and `user_id` as direct parameters
+- Session and user info now passed via metadata (compatible with Langfuse SDK v3)
+
 ## [1.0.0] - 2025-03-16
 
 ### Added
