@@ -265,15 +265,16 @@ class LangfusePlugin(Star):
             message_content = event.message_str or ""
             environment = self.plugin_config.get("environment", "production")
 
-            # Create a span for user message
+            # Create a span for user message with session and user info
             observation = self.langfuse_client.start_observation(
                 name="user_message",
                 as_type="span",
                 input={"content": message_content},
+                session_id=session.session_id,
+                user_id=user_id,
                 metadata={
                     "environment": environment,
                     "platform": platform,
-                    "user_id": user_id,
                 },
             )
             observation.end()
