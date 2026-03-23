@@ -12,6 +12,7 @@ import sys
 import time
 import traceback
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -20,6 +21,18 @@ from astrbot.api import logger as astrbot_logger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star
+
+# Context variable for plugin metadata (shared with other plugins like VideoVision)
+# Plugins can set this before LLM calls to customize Langfuse observation names
+_langfuse_observation_ctx: ContextVar[Optional[dict]] = ContextVar('langfuse_observation')
+
+# Try to get the context variable from VideoVision plugin if available
+try:
+    from astrbot_plugin_video_vision.main import langfuse_observation_ctx
+    # VideoVision plugin is loaded, use its context variable
+except ImportError:
+    # VideoVision not loaded, use our own
+    langfuse_observation_ctx = _langfuse_observation_ctx
 
 # Create a dedicated logger that writes to file for debugging
 DEBUG_LOG_FILE = "/tmp/astrbot_langfuse_debug.log"
@@ -320,12 +333,68 @@ class LangfusePlugin(Star):
             if req.image_urls:
                 input_data["image_count"] = len(req.image_urls)
 
+            if req.extra_user_content_parts:
+                # Include extra content parts (this is where VideoVision injects analysis)
+                extra_parts = []
+                for part in req.extra_user_content_parts:
+                    # Convert ContentPart to dict for logging
+                    if hasattr(part, 'model_dump'):
+                        extra_parts.append(part.model_dump())
+                    elif hasattr(part, 'dict'):
+                        extra_parts.append(part.dict())
+                    elif isinstance(part, dict):
+                        extra_parts.append(part)
+                    else:
+                        # Fallback: try to get text attribute
+                        extra_parts.append({"type": "unknown", "repr": str(part)})
+
+                input_data["extra_user_content_parts"] = extra_parts
+                input_data["extra_user_content_count"] = len(extra_parts)
+
+                # Log if video vision analysis is detected
+                for part in extra_parts:
+                    part_text = part.get("text", "") if isinstance(part, dict) else ""
+                    if "[Video Content Analysis]" in part_text:
+                        log_both("INFO", f"VideoVision analysis detected in LLM input ({len(part_text)} chars)")
+                        input_data["has_video_analysis"] = True
+
             # Get model name
             model = req.model or "unknown"
 
             # Store model in session for use in response
             session.metadata["model"] = model
             session.metadata["prompt"] = req.prompt
+
+            # Determine observation name based on context variable or content
+            observation_name = "llm_generation"
+            observation_metadata = {}
+
+            # Check if a plugin has set observation metadata via context variable
+            ctx_observation = langfuse_observation_ctx.get()
+            if ctx_observation:
+                observation_name = ctx_observation.get("name", "llm_generation")
+                observation_metadata = ctx_observation.get("metadata", {})
+                log_both("INFO", f"Using custom observation name from context: {observation_name}")
+            else:
+                # Fallback: check if video analysis was injected into this request (main conversation)
+                if req.extra_user_content_parts:
+                    for part in req.extra_user_content_parts:
+                        part_text = ""
+                        if hasattr(part, 'text'):
+                            part_text = part.text
+                        elif hasattr(part, 'model_dump'):
+                            part_dict = part.model_dump()
+                            part_text = part_dict.get("text", "")
+                        elif isinstance(part, dict):
+                            part_text = part.get("text", "")
+
+                        if "[Video Content Analysis]" in part_text:
+                            observation_name = "Main Conversation (with VideoVision)"
+                            observation_metadata["has_video_analysis"] = True
+                            break
+
+            # Store observation name in session for use in response
+            session.metadata["observation_name"] = observation_name
 
             # Use propagate_attributes to properly set session_id and user_id
             with propagate_attributes(
@@ -334,11 +403,12 @@ class LangfusePlugin(Star):
                 metadata={
                     "environment": environment,
                     "platform": platform,
+                    **observation_metadata,
                 },
             ):
                 # Create a generation observation (will be updated in response)
                 observation = self.langfuse_client.start_observation(
-                    name="llm_generation",
+                    name=observation_name,
                     as_type="generation",
                     model=model,
                     input=input_data,
@@ -399,6 +469,11 @@ class LangfusePlugin(Star):
                     output=completion_text,
                     model=model,
                 )
+
+                # Log custom observation name if used
+                obs_name = session.metadata.get("observation_name", "llm_generation")
+                if obs_name != "llm_generation":
+                    log_both("INFO", f"Custom observation '{obs_name}' completed")
 
                 if usage_dict:
                     session.current_observation.update(usage=usage_dict)
