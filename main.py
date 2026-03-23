@@ -370,7 +370,7 @@ class LangfusePlugin(Star):
             observation_metadata = {}
 
             # Check if a plugin has set observation metadata via context variable
-            ctx_observation = langfuse_observation_ctx.get()
+            ctx_observation = langfuse_observation_ctx.get(None)
             if ctx_observation:
                 observation_name = ctx_observation.get("name", "llm_generation")
                 observation_metadata = ctx_observation.get("metadata", {})
